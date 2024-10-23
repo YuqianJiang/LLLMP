@@ -1,0 +1,3 @@
+"{text}"
+The objects and the initial state in PDDL are provided below.
+{context}

@@ -566,7 +566,11 @@ VALUES ('answer_to', 'id'),
 ('is_placed', 'id'),
 ('name', 'str'),
 ('part_of', 'id'),
-('approach_to', 'id');
+('approach_to', 'id'),
+('room_has', 'id'),
+('shelf_has_level', 'id'),
+('tv_playing_channel', 'id'),
+('tv_on', 'id');
 $$;
 
 

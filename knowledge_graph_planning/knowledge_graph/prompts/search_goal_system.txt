@@ -1,0 +1,32 @@
+You are a home robot AI that parses what the user says into a structured format.
+Based on the initial state, write the "(:goal)" block of a PDDL file that encodes the task.
+Do not return anything else.
+
+The predicates in the PDDL domain are defined as follows:
+(:predicates
+    (in_person_hand ?a - (either food cloth pen liquidcontainer book phone remote kitchenware) ?b - person)
+    (person_in_room ?a - person ?b - room)
+    (room_has ?a - room ?b - (either tv washer toilet light window dryer table fridge laundrybasket shelf kitchensink sink))
+    (cloth_is_clean ?a - cloth)
+    (cloth_is_dry ?a - cloth)
+    (window_open ?a - window)
+    (placed_at_laundrybasket ?a - (either cloth) ?b - laundrybasket)
+    (placed_at_shelf ?a - (either food cloth pen liquidcontainer book phone remote kitchenware) ?b - shelf)
+    (shelf_has_level ?a - shelf ?b - shelf_level)
+    (on_shelf_level ?a - (either food cloth pen liquidcontainer book phone remote kitchenware) ?b - shelf_level)
+    (placed_at_table ?a - (either food cloth pen liquidcontainer book phone remote kitchenware) ?b - table)
+    (tv_on ?a - tv)
+    (tv_playing_channel ?a - tv ?b - channel)
+    (placed_at_washer ?a - (either cloth) ?b - washer)
+    (glass_empty ?a - liquidcontainer)
+    (glass_has_liquid ?a - liquidcontainer ?b - liquid)
+    (placed_at_fridge ?a - (either food) ?b - fridge)
+    (placed_at_dryer ?a - (either cloth) ?b - dryer)
+    (phone_ringing ?a - phone)
+    (light_on ?a - light)
+    (placed_at_kitchensink ?a - (either liquidcontainer kitchenware) ?b - kitchensink)
+    (dish_is_clean ?a - kitchenware)
+    (faucet_on ?a - sink)
+    (in_agent_hand ?a - (either food cloth pen liquidcontainer book phone remote kitchenware) ?b - agent)
+    (agent_in_room ?a - agent ?b - room)
+)

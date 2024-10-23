@@ -7,13 +7,13 @@ from pathlib import Path
 from difflib import ndiff
 
 from dataset.simulation import Dataset
-
 from knowledge_graph_planning.knowledge_graph.age import AgeGraphStore
 from knowledge_representation.knowledge_loader import load_knowledge_from_yaml, populate_with_knowledge # type: ignore
 from knowledge_representation._libknowledge_rep_wrapper_cpp import LongTermMemoryConduit # type: ignore
 
 from knowledge_graph.load_graph import load_graph
 from knowledge_graph.agent import KGBaseAgent, KGAgent
+from knowledge_graph.search_agent import KGSearchAgent
 from knowledge_graph.utils import reset_database
 
 # set API key
@@ -44,7 +44,6 @@ class KGSim:
 		)
 		all_knowledge = [load_knowledge_from_yaml(self.dataset.initial_knowledge_path)]
 		populate_with_knowledge(LongTermMemoryConduit("knowledge_base_truth", "localhost"), all_knowledge)
-		load_graph("knowledge_base_truth", "knowledge_graph")
 		truth_graph_store = AgeGraphStore(
 			"knowledge_base_truth",
 			"postgres",
@@ -54,6 +53,7 @@ class KGSim:
 			"knowledge_graph",
 			"entity",
 		) # type: ignore
+		load_graph(truth_graph_store, "knowledge_graph")
 
 		report: list[Result] = []
 		previous_diff = []
@@ -68,11 +68,14 @@ class KGSim:
 			elif time_step["type"] == "goal":
 				print("\nTime: " + str(time_step["time"]))
 				print(f"Goal: {time_step['goal']}")
-				predicted_plan = self.agent.answer_planning_query(time_step["goal"], truth_graph_store)
+				plan_file_name = self.agent.answer_planning_query(time_step["goal"])
+				with open(plan_file_name, "r") as f:
+					predicted_plan = f.read().splitlines()
+					self.agent.process_plan(predicted_plan, truth_graph_store)
 				print("Generated plan")
 
 				plan_file = "predicted_plan.pddl"
-				os.system(f"sudo docker run --rm -v {project_dir}:/root/experiments lapkt/lapkt-public ./siw-then-bfsf " + \
+				os.system(f"docker run --rm -v {project_dir}:/root/experiments lapkt/lapkt-public ./siw-then-bfsf " + \
 				  f"--domain /root/experiments/{self.dataset.domain_path} " + \
 				  f"--problem /root/experiments/{time_step['problem_path']} " + \
 				  f"--output /root/experiments/{plan_file} " + \
@@ -106,7 +109,6 @@ class KGSim:
 			)
 			all_knowledge = [load_knowledge_from_yaml(time_step["knowledge_path"])]
 			populate_with_knowledge(LongTermMemoryConduit("knowledge_base_truth", "localhost"), all_knowledge)
-			load_graph("knowledge_base_truth", "knowledge_graph")
 			truth_graph_store = AgeGraphStore(
 				"knowledge_base_truth",
 				"postgres",
@@ -116,6 +118,7 @@ class KGSim:
 				"knowledge_graph",
 				"entity",
 			) # type: ignore
+			load_graph(truth_graph_store, "knowledge_graph")
 
 			triplets_truth = truth_graph_store.query("MATCH (V)-[R]->(V2) RETURN V.name, type(R), V2.name", return_count=3)
 			triplets_truth = [" -> ".join(item[1:-1] for item in row) for row in triplets_truth if all(isinstance(s, str) for s in row)]
@@ -185,10 +188,12 @@ if __name__ == "__main__":
 
 	experiment_dir = "experiment"
 	domain_path = f"{experiment_dir}/domains/domain1"
-	run_dir = f"{experiment_dir}/runs/gpt-4/rag+check"
+	# run_dir = f"{experiment_dir}/runs/gpt-4/rag+check"
+	run_dir = f"{experiment_dir}/runs/gpt-4o/rag+search/domain1"
 	log = Logger(f"{run_dir}/output.log")
 	with redirect_stdout(log):
 		# os.system('sudo -u postgres psql -c "drop database knowledge_base"')
-		sim = KGSim(Dataset(domain_path), KGAgent(run_dir, True, True), run_dir)
+		# sim = KGSim(Dataset(domain_path), KGAgent(run_dir, True, True), run_dir)
+		sim = KGSim(Dataset(domain_path), KGSearchAgent(run_dir), run_dir)
 		sim.run()
 	log.close()

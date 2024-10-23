@@ -1,29 +1,14 @@
 import logging
 import sys
 
-def load_graph(db_name: str, graph_name: str):
+def load_graph(graph_store, graph_name: str):
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-
-    BUILD_INDEX = False
-
-    from knowledge_graph.age import AgeGraphStore
-    graph_store = AgeGraphStore(
-        dbname=db_name,
-        user="postgres",
-        password="password",
-        host="localhost",
-        port=5432,
-        graph_name=graph_name,
-        node_label="entity"
-    )
-
     cur = graph_store.cursor()
     entities_query = "SELECT DISTINCT ON (instance_of.entity_id) \
-                        instance_of.entity_id AS id, ea_str.attribute_value AS name, 'instance' as type \
+                        instance_of.entity_id AS id, ea_str.attribute_value AS name, instance_of.concept_name as type \
                         FROM instance_of INNER JOIN entity_attributes_str AS ea_str \
                         ON instance_of.entity_id = ea_str.entity_id AND ea_str.attribute_name = 'name' \
                         AND instance_of.concept_name != 'pose' and instance_of.concept_name != 'region' and instance_of.concept_name != 'map' \
-                        UNION SELECT concepts.entity_id AS id, concepts.concept_name AS name, 'concept' as type FROM concepts \
                         ORDER BY id ASC"
 
     cur.execute(entities_query)
@@ -54,14 +39,16 @@ def load_graph(db_name: str, graph_name: str):
                                 WHERE ea.attribute_name = '{attribute}'"
             add_attribute_to_graph(attribute, value_type, attribute_query, cur, graph_store)
 
-    # instance_of_query = "SELECT instance_of.entity_id AS start_id, \
-    #                         concepts.entity_id AS end_id \
-    #                         FROM instance_of \
-    #                         INNER JOIN concepts ON instance_of.concept_name = concepts.concept_name \
-    #                         WHERE instance_of.concept_name != 'pose' and instance_of.concept_name != 'region' and instance_of.concept_name != 'map' \
-    #                         ORDER BY start_id ASC "
-    # add_attribute_to_graph("instance_of", "id", instance_of_query, cur, graph_store)
-    cur.close()
-
 if __name__ == "__main__":
-    load_graph("knowledge_base", "knowledge_graph")
+    from knowledge_graph_planning.knowledge_graph.age import AgeGraphStore
+
+    graph_store = AgeGraphStore(
+        dbname="knowledge_base",
+        user="postgres",
+        password="password",
+        host="localhost",
+        port=5432,
+        graph_name="knowledge_graph",
+        node_label="entity"
+    )
+    load_graph(graph_store, "knowledge_graph")

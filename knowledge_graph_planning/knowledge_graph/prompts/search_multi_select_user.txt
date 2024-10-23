@@ -1,0 +1,6 @@
+You are told about something or asked to do something in the house.
+"{text}"
+Select entities from the list below that match the description "{description}"
+{entity_names}
+We have provided some context information in the form of (subject , -[predicate]->, object)
+{context}

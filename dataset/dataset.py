@@ -385,8 +385,8 @@ class Container(StationaryItem):
 		for item in all_items:
 			if not self.can_hold(type(item)):
 				continue
-			item.exchange_container(self)
 			agent.parent = self.parent
+			item.exchange_container(self)
 			return Goal(
 				f"Place {item.shortened_name} {item.relative_location} the {self.get_full_name_with_room()}.",
 				self.get_contains_predicates(self.token_name, item.token_name, **item.extra_location_info)
@@ -818,7 +818,6 @@ class KitchenSink(InteractableContainer):
 				predicates.append(f"dish_is_clean {dish.token_name}")
 			else:
 				predicates += self.get_contains_predicates(self.token_name, dish.token_name, **dish.extra_location_info)
-		agent.parent = self.parent
 		if clean_goal:
 			return Goal("Please wash all the dishes.", predicates)
 		return Goal(
@@ -2123,5 +2122,5 @@ for item_type in item_types:
 	static_entities += item_type.get_static_entities()
 
 if __name__ == "__main__":
-	generator = DatasetGenerator("test", num_state_changes=1, state_changes_per_query=300, state_changes_per_goal=1)
+	generator = DatasetGenerator("../experiment/domains/domain1", num_state_changes=10, state_changes_per_query=20, state_changes_per_goal=1)
 	generator.run()

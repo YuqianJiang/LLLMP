@@ -15,9 +15,9 @@ import tiktoken
 
 from knowledge_representation import get_default_ltmc # type: ignore
 from knowledge_representation.knowledge_loader import load_knowledge_from_yaml, populate_with_knowledge # type: ignore
-from knowledge_graph.load_graph import load_graph
-from knowledge_graph.age import AgeGraphStore
-from knowledge_graph.utils import reset_database
+from knowledge_graph_planning.knowledge_graph.load_graph import load_graph
+from knowledge_graph_planning.knowledge_graph.age import AgeGraphStore
+from knowledge_graph_planning.knowledge_graph.utils import reset_database
 
 from llama_index.core import ServiceContext
 from llama_index.core.storage.storage_context import StorageContext
@@ -29,7 +29,7 @@ from llama_index.llms.openai.base import ChatMessage
 from .utils import get_prompt_template, extract_keywords
 from .chat_mem_buffer import TripletTrimBuffer
 
-from pddl_parser.PDDL import PDDL_Parser, Action
+from knowledge_graph_planning.pddl_parser.PDDL import PDDL_Parser, Action
 
 
 class KGBaseAgent(ABC):
@@ -115,9 +115,6 @@ class KGAgent(KGBaseAgent):
 		)
 		all_knowledge = [load_knowledge_from_yaml(knowledge_path)]
 		populate_with_knowledge(get_default_ltmc(), all_knowledge)
-
-		load_graph(self.dbname, self.graph_name)
-
 		graph_name = "knowledge_graph"
 		self.graph_store = AgeGraphStore(
 			dbname=self.dbname,
@@ -127,7 +124,8 @@ class KGAgent(KGBaseAgent):
 			port=self.dbport,
 			graph_name=graph_name,
 			node_label="entity"
-		) # type: ignore
+		)  # type: ignore
+		load_graph(self.graph_store, self.graph_name)
 		
 		cur = self.graph_store.cursor()
 		
@@ -308,7 +306,7 @@ class KGAgent(KGBaseAgent):
 			print("Attempting state change...", num_attempts)
 
 			# query LLM to update triplets (remove existing and add new)
-			truncated_msgs = TripletTrimBuffer.from_defaults(messages, llm=self.llm, tokenizer_fn=tiktoken.encoding_for_model(self.llm.model).encode).get(triplet_update_prompt, triplets=filtered_triplet_str)
+			truncated_msgs = TripletTrimBuffer.from_defaults(messages, llm=self.llm, tokenizer_fn=tiktoken.encoding_for_model('gpt-4').encode).get(triplet_update_prompt, triplets=filtered_triplet_str)
 
 			curr_start_time = time.time()
 			curr_response = self.llm.chat(truncated_msgs).message
@@ -382,12 +380,13 @@ class KGAgent(KGBaseAgent):
 		log.append(f"Processed state change in (total time) {duration:.2f} seconds")
 		
 		# log the state update
+		log.append(f"Total time to process the update: {time.time() - start_time}")
 		log_file = os.path.join(self.log_dir, f"{self.time:04d}_state_change.log")
 		with open(log_file, "w") as f:
 			f.write("\n===================================\n".join(log))
 		self.time += 1
 	
-	def answer_planning_query(self, query: str, truth_graph_store: AgeGraphStore) -> list[str]:
+	def answer_planning_query(self, query: str) -> list[str]:
 		start_time = time.time()
 		log = [f"PLAN QUERY: {query}"]
 
@@ -463,14 +462,10 @@ class KGAgent(KGBaseAgent):
 		
 		with open(f"{log_file}.log", "w") as f:
 			f.write("\n===================================\n".join(log))
-		
-		with open(plan_file_name, "r") as f:
-			plan = f.read().splitlines()
-			self.process_plan(plan, truth_graph_store)
 
 		self.time += 1
-		return plan
-	
+		return plan_file_name
+
 	@staticmethod
 	def is_condition_met(condition: tuple, param_names: dict[str, str], graph_store: AgeGraphStore):
 		if condition[0] == 'not':
@@ -484,16 +479,16 @@ class KGAgent(KGBaseAgent):
 			return False
 		quantifier_types = forall_effect[1:-1]
 		param_names = param_names.copy()
-		
+
 		update = forall_effect[-1]
 		assert update[0] == 'when'
-		
+
 		conditions = update[1]
 		if conditions[0] == 'and':
 			conditions = conditions[1:]
 		else:
 			conditions = [conditions]
-		
+
 		effects = update[2]
 		if effects[0] == 'and':
 			effects = effects[1:]
@@ -511,9 +506,9 @@ class KGAgent(KGBaseAgent):
 					remove = True
 					effect = effect[1]
 				self.process_effect(effect, param_names, truth_graph_store, remove)
-		
+
 		return True
-	
+
 	def process_effect(self, effect: tuple[str], param_names: dict[str, str], truth_graph_store: AgeGraphStore, remove: bool = False):
 		predicate, required_params = effect[0], effect[1:]
 		if len(required_params) == 2:
@@ -545,7 +540,7 @@ class KGAgent(KGBaseAgent):
 				if predicate != "held_by_robot":
 					self.graph_store.delete(arg, predicate, "false")
 					truth_graph_store.delete(arg, predicate, "false")
-	
+
 	def process_plan(self, plan: list[str], truth_graph_store: AgeGraphStore):
 		for item in plan:
 			tokens = item[1:-1].lower().split()
@@ -556,7 +551,7 @@ class KGAgent(KGBaseAgent):
 			param_names = {}
 			for token, name in zip(action.parameters, args):
 				param_names[token[0]] = name
-			
+
 			# check if action is able to succeed in real environment
 			if not (
 				all(KGAgent.is_condition_met(pos_prec, param_names, truth_graph_store) for pos_prec in action.positive_preconditions) and
@@ -564,7 +559,7 @@ class KGAgent(KGBaseAgent):
 			):
 				print(f"Failure while processing plan at {item}")
 				return
-			
+
 			for del_effect in action.del_effects:
 				self.process_effect(del_effect, param_names, truth_graph_store, remove=True)
 

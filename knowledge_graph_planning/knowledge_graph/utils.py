@@ -14,7 +14,6 @@ def reset_database(dbname, user, password, host, port, schema_file):
         conn.autocommit = True  # Ensure we can execute CREATE/DROP DATABASE statements
         cur = conn.cursor()
 
-        # Optionally drop and recreate the database (useful for full reset)
         cur.execute(sql.SQL("DROP DATABASE IF EXISTS {};").format(sql.Identifier(dbname)))
         cur.execute(sql.SQL("CREATE DATABASE {};").format(sql.Identifier(dbname)))
         conn.commit()
