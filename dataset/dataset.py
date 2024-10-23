@@ -218,7 +218,7 @@ class MovableItem(RoomItem, Queryable):
 	
 	def set_shortened_name(self, shortened_name: str, use_default_article: bool) -> None:
 		self.shortened_name = "{}{}".format("the " if use_default_article else "", shortened_name)
-
+	
 	def exchange_container(self, new_container: Container | Person) -> None:
 		self.container.items.remove(self)
 		new_container.items.append(self)
@@ -236,9 +236,8 @@ class MovableItem(RoomItem, Queryable):
 			if len(usable_people) == 0:
 				return None
 			person = usable_people.pop(random.randrange(len(usable_people)))
-
-		self.exchange_container(person)
 		agent.parent = person.parent
+		self.exchange_container(person)
 		return Goal(
 			f"Hand {person.name} {self.shortened_name}.",
 			[person.get_in_hand_predicate(self.token_name, person.token_name)]
@@ -247,7 +246,7 @@ class MovableItem(RoomItem, Queryable):
 class AccompanyingItem(MovableItem):
 	def __init__(self, name: str, token_name: str, shortened_name: str, use_default_article: bool = True) -> None:
 		super().__init__(name, token_name, shortened_name, use_default_article)
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		return None
 
@@ -314,7 +313,6 @@ class Container(StationaryItem):
 		for item in items:
 			if not self.can_hold(type(item)):
 				continue
-
 			person.parent = self.parent
 			item.exchange_container(self)
 			return f"{person.name} went to {self.parent.name} and placed {item.shortened_name} {item.relative_location} the {self.name}."
@@ -381,7 +379,7 @@ class Container(StationaryItem):
 	@classmethod
 	def get_pddl_domain_actions(cls) -> list[Action]:
 		return [cls.get_place_action(), cls.get_remove_action()]
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		random.shuffle(all_items)
 		for item in all_items:
@@ -647,18 +645,18 @@ class Fridge(Container):
 			foods.append(cast(Food, food_item))
 			food_item = Food.generate_instance()
 		return Fridge("fridge", parent, foods), foods
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		if random.choice([True, False]):
 			goal = super().generate_goal(people, all_items, agent)
 			if goal is not None:
 				return goal
 		predicates: list[str] = []
+		agent.parent = self.parent
 		for food in self.foods:
 			if self != food.container:
 				food.exchange_container(self)
 			predicates += self.get_contains_predicates(self.token_name, food.token_name, **food.extra_location_info)
-		agent.parent = self.parent
 		return Goal(
 			f"Please return all food items to the {self.name} in {self.parent.name}.",
 			predicates
@@ -679,7 +677,7 @@ class Toilet(StationaryItem):
 	@staticmethod
 	def get_pddl_domain_actions() -> list[Action]:
 		return []
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		return None
 	
@@ -727,7 +725,7 @@ class Sink(StationaryInteractable):
 	
 	def get_description(self) -> str:
 		return "The sink has a faucet that can be turned on and off. It is currently {}. ".format("on" if self.faucet_on else "off")
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		self.faucet_on = random.choice([True, False])
 		pred = f"{Sink.FAUCET_ON_RELATION} {self.token_name}"
@@ -802,7 +800,7 @@ class KitchenSink(InteractableContainer):
 	
 	def get_special_yaml_attributes(self) -> list[Attribute]:
 		return [Attribute(Sink.FAUCET_ON_RELATION, self.faucet_on)]
-
+	
 	def generate_interactable_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		# 1/3 regular Sink goal, 1/3 clean goal, 1/3 return goal
 		if random.choice([True, False, False]):
@@ -811,6 +809,7 @@ class KitchenSink(InteractableContainer):
 				return goal
 		clean_goal = random.choice([True, False])
 		predicates: list[str] = []
+		agent.parent = self.parent
 		for dish in self.dishes:
 			if self != dish.container:
 				dish.exchange_container(self)
@@ -1013,7 +1012,7 @@ class Window(StationaryInteractable):
 	
 	def get_special_yaml_attributes(self) -> list[Attribute]:
 		return [Attribute("window_open", self.open)]
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		self.open = random.choice([True, False])
 		pred = f"window_open {self.token_name}"
@@ -1062,7 +1061,7 @@ class Light(StationaryInteractable):
 	
 	def get_special_yaml_attributes(self) -> list[Attribute]:
 		return [Attribute("light_on", self.on)]
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		self.on = random.choice([True, False])
 		pred = f"light_on {self.token_name}"
@@ -1231,9 +1230,8 @@ class TV(StationaryInteractable):
 			if len(usable_people) == 0:
 				return None
 			person = usable_people.pop(random.randrange(len(usable_people)))
-
-		self.remote.exchange_container(person)
 		agent.parent = person.parent
+		self.remote.exchange_container(person)
 		return Goal(
 			f"{person.name} is trying to use the TV in {self.parent.name} but they need the remote. Please hand it to them.",
 			[person.get_in_hand_predicate(self.remote.token_name, person.token_name)]
@@ -1275,7 +1273,7 @@ class Phone(MovableInteractable):
 	
 	def get_special_yaml_attributes(self) -> list[Attribute]:
 		return [Attribute("phone_ringing", self.ringing)]
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		if random.choice([True, False]):
 			goal = super().generate_goal(people, all_items, agent)
@@ -1357,7 +1355,7 @@ class LiquidContainer(MovableInteractable, AccompanyingItem):
 			assert(isinstance(self.liquid, Instance))
 			attributes.append(Attribute("glass_has_liquid", self.liquid.entity_id))
 		return attributes
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		if random.choice([True, False]):
 			self.empty = True
@@ -1367,8 +1365,8 @@ class LiquidContainer(MovableInteractable, AccompanyingItem):
 		self.empty = False
 		self.liquid = random.choice(LiquidContainer.LIQUIDS)
 		person = random.choice(people)
-		self.exchange_container(person)
 		agent.parent = person.parent
+		self.exchange_container(person)
 		return Goal(
 			f"Hand {person.name} a glass of {self.liquid.entity_id.name}.",
 			[person.get_in_hand_predicate(self.token_name, person.token_name), f"glass_has_liquid {self.token_name} {self.liquid.entity_id.name}"]
@@ -1389,7 +1387,7 @@ class Person:
 
 	with open(os.path.join(DIR, "names.txt")) as f:	
 		available_names = f.read().splitlines()
-
+	
 	def __init__(self, name: str, parent: Room) -> None:
 		self.items: list[MovableItem] = []
 		self.name = name
@@ -1439,8 +1437,8 @@ class Person:
 				continue
 			action = f"{self.name} went to {item.container.parent.name} and picked up {item.shortened_name}." if isinstance(item.container, Container) \
 						else f"{self.name} went to {item.container.parent.name} and took {item.shortened_name} from {item.container.name}."
-			item.exchange_container(self)
 			self.parent = item.container.parent
+			item.exchange_container(self)
 			return action
 	
 	def get_description(self) -> str:
@@ -1488,12 +1486,12 @@ class CleanAndDryClothes(CollectiveGoal):
 		if len(clothes) == 0:
 			return None
 		predicates = []
+		agent.parent = laundry_basket.parent
 		for cloth in clothes:
 			cloth.exchange_container(laundry_basket)
 			cloth.clean = True
 			predicates += [f"cloth_is_clean {cloth.token_name}", f"cloth_is_dry {cloth.token_name}"] \
 							+ laundry_basket.get_contains_predicates(laundry_basket.token_name, cloth.token_name)
-		agent.parent = laundry_basket.parent
 		return Goal("Please wash and dry all the clothes, then place them in the laundry basket.", predicates)
 
 item_types: list[type[RoomItem]]
@@ -1580,7 +1578,7 @@ class Room(ABC):
 				Room.item_type_freq[type(item)] = Room.item_type_freq.get(type(item), 0) + 1
 				return action
 		return None
-
+	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		usable_items, probabilities = self.get_items_with_probabilities()
 		while len(usable_items) > 0:
