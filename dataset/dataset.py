@@ -532,8 +532,8 @@ class Shelf(Container):
 	for i in range(MAX_LEVELS):
 		LEVEL_OBJECTS.append(Instance(EntityID(get_level_name.__func__(i + 1), LEVEL_TYPE), []))
 
-	def __init__(self, parent: Room, levels: int) -> None:
-		super().__init__("shelf", parent)
+	def __init__(self, name: str, parent: Room, levels: int) -> None:
+		super().__init__(name, parent)
 		self.levels = levels
 	
 	@staticmethod
@@ -542,17 +542,17 @@ class Shelf(Container):
 	
 	@staticmethod
 	def generate_instance(parent: Room) -> tuple[Shelf, list[AccompanyingItem]]:
-		return Shelf(parent, random.randint(Shelf.MIN_LEVELS, Shelf.MAX_LEVELS)), []
+		return Shelf("shelf", parent, random.randint(Shelf.MIN_LEVELS, Shelf.MAX_LEVELS)), []
 	
 	def get_description(self) -> str:
 		items_by_level: dict[int, list[MovableItem]] = {level : [] for level in range(1, self.levels + 1)}
 		for item in self.items:
 			items_by_level[item.extra_location_info["level_num"]].append(item)
-		description = f"The shelf has {self.levels} levels. "
+		description = f"The {self.name} has {self.levels} levels. "
 		for level, item_list in items_by_level.items():
 			if len(item_list) == 0:
 				continue
-			description += f"The {Shelf.integer_to_ordinal(level)} level of the shelf has {Shelf.get_item_list_description(item_list)}. "
+			description += f"The {Shelf.integer_to_ordinal(level)} level of the {self.name} has {Shelf.get_item_list_description(item_list)}. "
 		return description
 	
 	def generate_relative_location(self) -> tuple[str, dict[Any, Any]]:
@@ -622,35 +622,151 @@ class Shelf(Container):
 	def get_static_entities() -> list[Instance]:
 		return Shelf.LEVEL_OBJECTS
 
-class Fridge(Container):
+class Pantry(Shelf):
 	MIN_FOODS = 30
 	MAX_FOODS = 40
-	def __init__(self, name: str, parent: Room, foods: list[Food]) -> None:
-		super().__init__(name, parent)
+
+	def __init__(self, name: str, parent: Room, levels: int, foods: list[NonPerishable]) -> None:
+		super().__init__(name, parent, levels)
 		self.foods = foods
 
 	@staticmethod
 	def can_hold(item_type: type[MovableItem]) -> bool:
-		return issubclass(item_type, Food)
+		return issubclass(item_type, NonPerishable)
+		
+	@classmethod
+	def get_contains_relation(cls) -> str:
+		return Shelf.get_contains_relation()
+
+	@classmethod
+	def get_place_action_name(cls) -> str:
+		return Shelf.get_place_action_name()
+
+	@classmethod
+	def get_remove_action_name(cls) -> str:
+		return Shelf.get_remove_action_name()
 	
-	def generate_relative_location(self) -> tuple[str, dict[Any, Any]]:
-		return "inside", {}
+	@classmethod
+	def get_pddl_domain_predicates(cls) -> list[Predicate]:
+		return []
+	
+	@classmethod
+	def get_place_action(cls) -> Action:
+		return Shelf.get_place_action()
+	
+	@classmethod
+	def get_remove_action(cls) -> Action:
+		return Shelf.get_remove_action()
+	
+	@classmethod
+	def get_pddl_domain_actions(cls) -> list[Action]:
+		return []
 
 	@staticmethod
-	def generate_instance(parent: Room) -> tuple[Fridge, list[Food]]:
-		foods: list[Food] = []
-		food_item = Food.generate_instance()
-		threshold = random.randint(Fridge.MIN_FOODS, Fridge.MAX_FOODS)
+	def generate_instance(parent: Room) -> tuple[Pantry, list[NonPerishable]]:
+		foods: list[NonPerishable] = []
+		food_item = NonPerishable.generate_instance()
+		threshold = random.randint(Pantry.MIN_FOODS, Pantry.MAX_FOODS)
 		while food_item is not None and len(foods) < threshold:
-			foods.append(cast(Food, food_item))
-			food_item = Food.generate_instance()
-		return Fridge("fridge", parent, foods), foods
+			assert isinstance(food_item, NonPerishable)
+			foods.append(food_item)
+			food_item = NonPerishable.generate_instance()
+		return Pantry("pantry", parent, random.randint(Shelf.MIN_LEVELS, Shelf.MAX_LEVELS), foods), foods
+	
+	def generate_special_goal(self, agent: Agent, combined: bool = False) -> Goal:
+		num_splits = random.randint(min(3, Shelf.MIN_LEVELS), min(len(NonPerishable.categories), Shelf.MAX_LEVELS))
+		levels = random.sample(range(1, self.levels + 1), num_splits)
+		categories = NonPerishable.categories.copy()
+		random.shuffle(categories)
+		category_to_level: dict[str, int] = {}
+		split_size, split_remainder = divmod(len(categories), num_splits)
+		goal_str = f"Organize the {self.name if combined else self.get_full_name_with_room()} as follows. "
+
+		idx = 0
+		for i, level in enumerate(levels):
+			newidx = idx + split_size + (1 if i < split_remainder else 0)
+			curr_categories = categories[idx : newidx]
+			idx = newidx
+			for category in curr_categories:
+				category_to_level[category] = level
+			
+			categories_str = curr_categories[0]
+			for j, category in enumerate(curr_categories[1:]):
+				if j == len(curr_categories) - 2:
+					categories_str += " and " + category
+				else:
+					categories_str += ", " + category
+
+			goal_str += f"Place all {categories_str} on the {Shelf.integer_to_ordinal(level)} level. "
+
+		predicates: list[str] = []
+		agent.parent = self.parent
+		for food in self.foods:
+			if self != food.container:
+				food.exchange_container(self)
+			category = NonPerishable.item_to_category[re.sub(r"[^a-z]", "", food.name)]
+			level = category_to_level[category]
+			food.relative_location = f"on the {Shelf.integer_to_ordinal(level)} level of"
+			food.extra_location_info = {
+				"level_num": level,
+				"level_token": self.get_level_name(level),
+				"extra_attributes": [Attribute("on_shelf_level", Shelf.LEVEL_OBJECTS[level - 1].entity_id)]
+			}
+			predicates += self.get_contains_predicates(self.token_name, food.token_name, **food.extra_location_info)
+
+		return Goal(goal_str, predicates)
 	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
 		if random.choice([True, False]):
 			goal = super().generate_goal(people, all_items, agent)
 			if goal is not None:
 				return goal
+		return self.generate_special_goal(agent)
+	
+	@classmethod
+	def get_default_param_list(cls) -> list[str]:
+		param_list = super().get_default_param_list()
+		param_list.append(f"{cls.LEVEL_PARAM} - {cls.LEVEL_TYPE}")
+		return param_list
+	
+	@classmethod
+	def get_type_name(cls) -> str:
+		return Shelf.get_type_name()
+
+	@classmethod
+	def get_required_types(cls) -> list[str]:
+		return []
+	
+	@staticmethod
+	def get_static_entities() -> list[Instance]:
+		return []
+
+class Fridge(Container):
+	MIN_FOODS = 30
+	MAX_FOODS = 40
+	def __init__(self, name: str, parent: Room, foods: list[Perishable]) -> None:
+		super().__init__(name, parent)
+		self.foods = foods
+
+	@staticmethod
+	def can_hold(item_type: type[MovableItem]) -> bool:
+		return issubclass(item_type, Perishable)
+	
+	def generate_relative_location(self) -> tuple[str, dict[Any, Any]]:
+		return "inside", {}
+
+	@staticmethod
+	def generate_instance(parent: Room) -> tuple[Fridge, list[Perishable]]:
+		foods: list[Perishable] = []
+		food_item = Perishable.generate_instance()
+		threshold = random.randint(Fridge.MIN_FOODS, Fridge.MAX_FOODS)
+		while food_item is not None and len(foods) < threshold:
+			assert isinstance(food_item, Perishable)
+			foods.append(food_item)
+			food_item = Perishable.generate_instance()
+		return Fridge("fridge", parent, foods), foods
+	
+	def generate_special_goal(self, agent: Agent, combined: bool = False) -> Goal:
 		predicates: list[str] = []
 		agent.parent = self.parent
 		for food in self.foods:
@@ -658,9 +774,16 @@ class Fridge(Container):
 				food.exchange_container(self)
 			predicates += self.get_contains_predicates(self.token_name, food.token_name, **food.extra_location_info)
 		return Goal(
-			f"Please return all food items to the {self.name} in {self.parent.name}.",
+			f"Move all fruits/vegetables, dairy products, and frozen food to the {self.name if combined else self.get_full_name_with_room()}.",
 			predicates
 		)
+	
+	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
+		if random.choice([True, False]):
+			goal = super().generate_goal(people, all_items, agent)
+			if goal is not None:
+				return goal
+		return self.generate_special_goal(agent)
 
 class Toilet(StationaryItem):
 	@staticmethod
@@ -706,9 +829,21 @@ class Sink(StationaryInteractable):
 	
 	@staticmethod
 	def get_pddl_domain_actions() -> list[Action]:
+		param_list = ["?a - " + Sink.get_type_name(), "?b - " + Room.TYPE_NAME, "?c - " + Agent.TYPE_NAME]
+		base_preconditions = [Room.get_in_room_predicate("?b", "?a"), Agent.get_in_room_predicate("?c", "?b")]
 		return [
-			Action("turn_on_faucet", ["?a - " + Sink.get_type_name()], [f"not ({Sink.FAUCET_ON_RELATION} ?a)"], [f"{Sink.FAUCET_ON_RELATION} ?a"]),
-			Action("turn_off_faucet", ["?a - " + Sink.get_type_name()], [f"{Sink.FAUCET_ON_RELATION} ?a"], [f"not ({Sink.FAUCET_ON_RELATION} ?a)"])
+			Action(
+				"turn_on_faucet",
+				param_list,
+				base_preconditions + [f"not ({Sink.FAUCET_ON_RELATION} ?a)"],
+				[f"{Sink.FAUCET_ON_RELATION} ?a"]
+			),
+			Action(
+				"turn_off_faucet",
+				param_list,
+				base_preconditions + [f"{Sink.FAUCET_ON_RELATION} ?a"],
+				[f"not ({Sink.FAUCET_ON_RELATION} ?a)"]
+			)
 		]
 	
 	def get_special_init_conditions(self) -> list[str]:
@@ -779,7 +914,14 @@ class KitchenSink(InteractableContainer):
 	
 	@staticmethod
 	def get_special_domain_actions() -> list[Action]:
-		return [Action("wash", [f"?a - {Kitchenware.get_type_name()}", f"?b - {KitchenSink.get_type_name()}"], KitchenSink.get_contains_predicates("?b", "?a"), ["dish_is_clean ?a"])]
+		return [
+			Action(
+				"wash",
+				[f"?a - {Kitchenware.get_type_name()}", f"?b - {KitchenSink.get_type_name()}", "?c - " + Room.TYPE_NAME, "?d - " + Agent.TYPE_NAME],
+				[Room.get_in_room_predicate("?c", "?b"), Agent.get_in_room_predicate("?d", "?c")] + KitchenSink.get_contains_predicates("?b", "?a"),
+				["dish_is_clean ?a"]
+			)
+		]
 	
 	@classmethod
 	def get_required_types(cls) -> list[str]:
@@ -843,12 +985,12 @@ class Washer(Container):
 	@classmethod
 	def get_pddl_domain_actions(cls) -> list[Action]:
 		actions = super().get_pddl_domain_actions()
-		cloth_preconditions = ") (".join(cls.get_contains_predicates("?a", "?b", **cls.EXTRA_INFO))
+		cloth_preconditions = ") (".join(cls.get_contains_predicates("?a", "?d", **cls.EXTRA_INFO))
 		actions.append(Action(
 			"run_washer_cycle",
-			[f"?a - {cls.get_type_name()}"],
-			[],
-			[f"forall (?b - {Cloth.get_type_name()}) (when ({cloth_preconditions}) (and (cloth_is_clean ?b) (not (cloth_is_dry ?b))))"]))
+			[f"?a - {cls.get_type_name()}", f"?b - {Room.TYPE_NAME}", f"?c - {Agent.TYPE_NAME}"],
+			[Room.get_in_room_predicate("?b", "?a"), Agent.get_in_room_predicate("?c", "?b")],
+			[f"forall (?d - {Cloth.get_type_name()}) (when ({cloth_preconditions}) (and (cloth_is_clean ?d) (not (cloth_is_dry ?d))))"]))
 		return actions
 
 class Dryer(Container):
@@ -869,12 +1011,12 @@ class Dryer(Container):
 	@classmethod
 	def get_pddl_domain_actions(cls) -> list[Action]:
 		actions = super().get_pddl_domain_actions()
-		cloth_preconditions = ") (".join(cls.get_contains_predicates("?a", "?b", **cls.EXTRA_INFO))
+		cloth_preconditions = ") (".join(cls.get_contains_predicates("?a", "?d", **cls.EXTRA_INFO))
 		actions.append(Action(
 			"run_dryer_cycle",
-			[f"?a - {cls.get_type_name()}"],
-			[],
-			[f"forall (?b - {Cloth.get_type_name()}) (when ({cloth_preconditions}) (cloth_is_dry ?b))"]))
+			[f"?a - {cls.get_type_name()}", f"?b - {Room.TYPE_NAME}", f"?c - {Agent.TYPE_NAME}"],
+			[Room.get_in_room_predicate("?b", "?a"), Agent.get_in_room_predicate("?c", "?b")],
+			[f"forall (?d - {Cloth.get_type_name()}) (when ({cloth_preconditions}) (cloth_is_dry ?d))"]))
 		return actions
 
 class LaundryBasket(Container):
@@ -938,13 +1080,41 @@ class Singleton(MovableItem):
 			return None
 		return cls(names.pop(random.randrange(len(names))))
 
-class Food(Singleton, AccompanyingItem):
-	with open(os.path.join(DIR, "foods.txt")) as f:
+class Perishable(Singleton, AccompanyingItem):
+	with open(os.path.join(DIR, "perishable_foods.txt")) as f:
 		available_foods = f.read().lower().splitlines()
 	
 	@staticmethod
 	def get_available_names() -> list[str]:
-		return Food.available_foods
+		return Perishable.available_foods
+	
+	@classmethod
+	def get_required_types(cls) -> list[str]:
+		return ["food", f"{cls.get_type_name()} - food"]
+	
+class NonPerishable(Singleton, AccompanyingItem):
+	available_foods: list[str] = []
+	categories: list[str] = []
+	item_to_category: dict[str, str] = {}	
+	with open(os.path.join(DIR, "nonperishable_foods.txt")) as f:
+		foods = f.read().lower().strip().split("\n\n")
+	for category in foods:
+		items = category.splitlines()
+		name, items = items[0], items[1:]
+		available_foods += items
+		categories.append(name)
+		for item in items:
+			item = re.sub(r"[^a-z]", "", item)
+			item_to_category[item] = name
+	del foods, category, items, name, item
+
+	@staticmethod
+	def get_available_names() -> list[str]:
+		return NonPerishable.available_foods
+	
+	@classmethod
+	def get_required_types(cls) -> list[str]:
+		return [f"{cls.get_type_name()} - food"]
 
 class Kitchenware(Singleton, AccompanyingItem):
 	available_kitchenware = ["plate", "bowl", "fork", "spoon", "knife", "frying pan", "pot", "ladle", "whisk"]
@@ -999,9 +1169,21 @@ class Window(StationaryInteractable):
 
 	@staticmethod
 	def get_pddl_domain_actions() -> list[Action]:
+		param_list = ["?a - window", "?b - " + Room.TYPE_NAME, "?c - " + Agent.TYPE_NAME]
+		base_preconditions = [Room.get_in_room_predicate("?b", "?a"), Agent.get_in_room_predicate("?c", "?b")]
 		return [
-			Action("open_window", ["?a - window"], ["not (window_open ?a)"], ["window_open ?a"]),
-			Action("close_window", ["?a - window"], ["window_open ?a"], ["not (window_open ?a)"])
+			Action(
+				"open_window",
+				param_list,
+				base_preconditions + ["not (window_open ?a)"],
+				["window_open ?a"]
+			),
+			Action(
+				"close_window",
+				param_list,
+				base_preconditions + ["window_open ?a"],
+				["not (window_open ?a)"]
+			)
 		]
 	
 	def get_special_init_conditions(self) -> list[str]:
@@ -1048,9 +1230,21 @@ class Light(StationaryInteractable):
 	
 	@staticmethod
 	def get_pddl_domain_actions() -> list[Action]:
+		param_list = ["?a - " + Light.get_type_name(), "?b - " + Room.TYPE_NAME, "?c - " + Agent.TYPE_NAME]
+		base_preconditions = [Room.get_in_room_predicate("?b", "?a"), Agent.get_in_room_predicate("?c", "?b")]
 		return [
-			Action("turn_on_light", ["?a - " + Light.get_type_name()], ["not (light_on ?a)"], ["light_on ?a"]),
-			Action("turn_off_light", ["?a - " + Light.get_type_name()], ["light_on ?a"], ["not (light_on ?a)"])
+			Action(
+				"turn_on_light",
+				param_list,
+				base_preconditions + ["not (light_on ?a)"],
+				["light_on ?a"]
+			),
+			Action(
+				"turn_off_light",
+				param_list,
+				base_preconditions + ["light_on ?a"],
+				["not (light_on ?a)"]
+			)
 		]
 	
 	def get_special_init_conditions(self) -> list[str]:
@@ -1337,8 +1531,18 @@ class LiquidContainer(MovableInteractable, AccompanyingItem):
 	@staticmethod
 	def get_pddl_domain_actions() -> list[Action]:
 		return [
-			Action("empty_glass", ["?a - " + LiquidContainer.get_type_name(), "?b - liquid"], ["glass_has_liquid ?a ?b"], ["glass_empty ?a", "not (glass_has_liquid ?a ?b)"]),
-			Action("fill_with_liquid", ["?a - " + LiquidContainer.get_type_name(), "?b - liquid"], ["glass_empty ?a", "dish_is_clean ?a"], ["not (glass_empty ?a)", "glass_has_liquid ?a ?b", "not (dish_is_clean ?a)"])
+			Action(
+				"empty_glass",
+				["?a - " + LiquidContainer.get_type_name(), "?b - liquid", "?c - " + Agent.TYPE_NAME],
+				[Agent.get_in_hand_predicate("?a", "?c"),  "glass_has_liquid ?a ?b"],
+				["glass_empty ?a", "not (glass_has_liquid ?a ?b)"]
+			),
+			Action(
+				"fill_with_liquid",
+				["?a - " + LiquidContainer.get_type_name(), "?b - liquid", "?c - " + Agent.TYPE_NAME],
+				[Agent.get_in_hand_predicate("?a", "?c"), "glass_empty ?a", "dish_is_clean ?a"],
+				["not (glass_empty ?a)", "glass_has_liquid ?a ?b", "not (dish_is_clean ?a)"]
+			)
 		]
 
 	@staticmethod
@@ -1473,9 +1677,13 @@ class TurnOffAppliances(CollectiveGoal):
 				item.faucet_on = False
 				predicate_list.append(f"not (faucet_on {item.token_name})")
 				last = item
+			elif isinstance(item, TV):
+				item.on = False
+				predicate_list.append(f"not (tv_on {item.token_name})")
+				last = item
 		if last:
 			agent.parent = last.parent
-		return Goal("The water and electricity bills are high. Can you turn off all lights and faucets?", predicate_list)
+		return Goal("The water and electricity bills are high. Can you turn off all appliances (other than the fridge)?", predicate_list)
 
 class CleanAndDryClothes(CollectiveGoal):
 	@staticmethod
@@ -1498,6 +1706,13 @@ movable_types: list[type[MovableItem]]
 stationary_types: list[type[StationaryItem]]
 collective_goal_types: list[type[CollectiveGoal]]
 
+def get_items_and_probabilities(item_freq: dict[T, int], item_type_freq: dict[type[T], int], item_list: list[T]) -> tuple[list[T], list[float]]:
+	item_probs = [1 / (item_freq.get(item, 0) + 1) ** 2 for item in item_list]
+	item_type_probs = [1 / (item_type_freq.get(type(item), 0) + 1) ** 2 for item in item_list]
+	item_probs = normalize_probabilities(item_probs)
+	item_type_probs = normalize_probabilities(item_type_probs)
+	return item_list.copy(), [item_prob * item_type_prob for item_prob, item_type_prob in zip(item_probs, item_type_probs)]
+
 def normalize_probabilities(p: list[float]) -> list[float]:
 	total = sum(p)
 	return [x / total for x in p]
@@ -1507,7 +1722,8 @@ class Room(ABC):
 	ITEM_PARAM = "?b"
 	TYPE_NAME = "room"
 	IN_ROOM_RELATION = "room_has"
-	item_type_freq: dict[type[StationaryItem], int] = {}
+	item_type_goal_freq: dict[type[StationaryItem], int] = {}
+	item_type_update_freq: dict[type[StationaryItem], int] = {}
 
 	def __init__(self, name: str, token_name: str) -> None:
 		self.name = name
@@ -1516,7 +1732,8 @@ class Room(ABC):
 		self.items: list[StationaryItem] = []
 		self.queryable_items: list[Queryable] = []
 		self.yaml_instance: Instance
-		self.item_freq: dict[StationaryItem, int] = {}
+		self.item_goal_freq: dict[StationaryItem, int] = {}
+		self.item_update_freq: dict[StationaryItem, int] = {}
 	
 	def add_item(self, item: StationaryItem) -> None:
 		self.items.append(item)
@@ -1560,11 +1777,8 @@ class Room(ABC):
 			room_description += item.get_description()
 		return room_description
 	
-	def get_items_with_probabilities(self) -> tuple[list[StationaryItem], list[float]]:
-		return self.items.copy(), [1 / (self.item_freq.get(item, 0) + 1) / (Room.item_type_freq.get(type(item), 0) + 1) for item in self.items]
-	
 	def perform_action(self, people: list[Person]) -> str | None:
-		usable_items, probabilities = self.get_items_with_probabilities()
+		usable_items, probabilities = get_items_and_probabilities(self.item_update_freq, Room.item_type_update_freq, self.items)
 		while len(usable_items) > 0:
 			probabilities = normalize_probabilities(probabilities)
 			idx = np.random.choice(np.arange(len(usable_items)), p=probabilities)
@@ -1573,13 +1787,13 @@ class Room(ABC):
 
 			action = item.perform_action(people)
 			if action is not None:
-				self.item_freq[item] = self.item_freq.get(item, 0) + 1
-				Room.item_type_freq[type(item)] = Room.item_type_freq.get(type(item), 0) + 1
+				self.item_update_freq[item] = self.item_update_freq.get(item, 0) + 1
+				Room.item_type_update_freq[type(item)] = Room.item_type_update_freq.get(type(item), 0) + 1
 				return action
 		return None
 	
 	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
-		usable_items, probabilities = self.get_items_with_probabilities()
+		usable_items, probabilities = get_items_and_probabilities(self.item_goal_freq, Room.item_type_goal_freq, self.items)
 		while len(usable_items) > 0:
 			probabilities = normalize_probabilities(probabilities)
 			idx = np.random.choice(np.arange(len(usable_items)), p=probabilities)
@@ -1588,8 +1802,8 @@ class Room(ABC):
 
 			goal = item.generate_goal(people, all_items, agent)
 			if goal is not None:
-				self.item_freq[item] = self.item_freq.get(item, 0) + 1
-				Room.item_type_freq[type(item)] = Room.item_type_freq.get(type(item), 0) + 1
+				self.item_goal_freq[item] = self.item_goal_freq.get(item, 0) + 1
+				Room.item_type_goal_freq[type(item)] = Room.item_type_goal_freq.get(type(item), 0) + 1
 				return goal
 		return None
 	
@@ -1643,7 +1857,21 @@ class Kitchen(Room):
 	
 	@staticmethod
 	def can_hold(stationary_type: type[StationaryItem]) -> bool:
-		return stationary_type in [Fridge, KitchenSink, Light]
+		return stationary_type in [Fridge, KitchenSink, Light, Pantry]
+
+	def generate_goal(self, people: list[Person], all_items: list[MovableItem], agent: Agent) -> Goal | None:
+		if random.choice([True, False]):
+			goal = super().generate_goal(people, all_items, agent)
+			if goal is not None:
+				return goal
+		pantry = next(item for item in self.items if isinstance(item, Pantry))
+		fridge = next(item for item in self.items if isinstance(item, Fridge))
+		fridge_goal = fridge.generate_special_goal(agent, combined=True)
+		pantry_goal = pantry.generate_special_goal(agent, combined=True)
+		return Goal(
+			"I want to organize the kitchen. " + fridge_goal.description + " " + pantry_goal.description,
+			fridge_goal.predicate_list + pantry_goal.predicate_list
+		)
 
 class LivingRoom(Room):
 	generated = False
@@ -1788,8 +2016,18 @@ class DatasetGenerator:
 		self.rooms: list[Room] = []
 		self.people: list[Person] = []
 		self.description = ""
-		self.item_type_freq: dict[type[MovableItem], int] = {}
-		self.item_freq: dict[MovableItem, int] = {}
+		
+		self.item_type_goal_freq: dict[type[MovableItem], int] = {}
+		self.item_goal_freq: dict[MovableItem, int] = {}
+		self.item_type_update_freq: dict[type[MovableItem], int] = {}
+		self.item_update_freq: dict[MovableItem, int] = {}
+
+		self.room_type_goal_freq: dict[type[Room], int] = {}
+		self.room_goal_freq: dict[Room, int] = {}
+		self.room_type_update_freq: dict[type[Room], int] = {}
+		self.room_update_freq: dict[Room, int] = {}
+
+		self.collective_goal_type_freq: dict[type[CollectiveGoal], int] = {}
 
 		self.movable_items: list[MovableItem] = []
 		for movable_type in creatable_movable_types:
@@ -1833,66 +2071,103 @@ class DatasetGenerator:
 			self.description += person.get_description()
 		self.description += self.agent.get_description()
 
-	def get_items_and_probabilities(self) -> tuple[list[MovableItem], list[float]]:
-		return self.movable_items.copy(), [1 / (self.item_freq.get(item, 0) + 1) / (self.item_type_freq.get(type(item), 0) + 1) for item in self.movable_items]
-	
+	FRAC_ROOM_UPDATES = 0.5
+	FRAC_MOVABLE_UPDATES = 0.3
+	FRAC_PERSON_UPDATES = 0.2
+
 	def generate_state_change(self) -> str:
 		all_items = self.movable_items.copy()
-		usable_rooms = self.rooms.copy()
-		usable_movables, movable_probabilities = self.get_items_and_probabilities()
+		usable_rooms, room_probabilities = get_items_and_probabilities(self.room_update_freq, self.room_type_update_freq, self.rooms)
+		usable_movables, movable_probabilities = get_items_and_probabilities(self.item_update_freq, self.item_type_update_freq, self.movable_items)
 		usable_people = self.people.copy()
 		for _ in range(MAX_ITER):
 			assert len(usable_rooms) > 0 or len(usable_movables) > 0 or len(usable_people) > 0
-			choice = random.randrange(5)
-			if len(usable_rooms) > 0 and choice <= 2:
-				action = usable_rooms.pop(random.randrange(len(usable_rooms))).perform_action(self.people)
+			choice = np.random.choice(np.arange(3), p=[DatasetGenerator.FRAC_ROOM_UPDATES, DatasetGenerator.FRAC_MOVABLE_UPDATES, DatasetGenerator.FRAC_PERSON_UPDATES])
+			if choice == 0:
+				if len(usable_rooms) == 0:
+					continue
+				room_probabilities = normalize_probabilities(room_probabilities)
+				idx = np.random.choice(np.arange(len(usable_rooms)), p=room_probabilities)
+				room_probabilities.pop(idx)
+				room = usable_rooms.pop(idx)
+				action = room.perform_action(self.people)
 				if action is not None:
+					self.room_update_freq[room] = self.room_update_freq.get(room, 0) + 1
+					self.room_type_update_freq[type(room)] = self.room_type_update_freq.get(type(room), 0) + 1
 					return action
-			elif len(usable_movables) > 0 and choice == 3:
+			elif choice == 1:
+				if len(usable_movables) == 0:
+					continue
 				movable_probabilities = normalize_probabilities(movable_probabilities)
 				idx = np.random.choice(np.arange(len(usable_movables)), p=movable_probabilities)
 				movable_probabilities.pop(idx)
 				item = usable_movables.pop(idx)
 				action = item.perform_action(self.people)
 				if action is not None:
-					self.item_freq[item] = self.item_freq.get(item, 0) + 1
-					self.item_type_freq[type(item)] = self.item_type_freq.get(type(item), 0) + 1
+					self.item_update_freq[item] = self.item_update_freq.get(item, 0) + 1
+					self.item_type_update_freq[type(item)] = self.item_type_update_freq.get(type(item), 0) + 1
 					return action
-			elif len(usable_people) > 0:
+			elif choice == 2:
+				if len(usable_people) == 0:
+					continue
 				action = usable_people.pop(random.randrange(len(usable_people))).perform_action(all_items)
 				if action is not None:
 					return action
 		raise Exception("Unable to generate state change")
 	
+	FRAC_ROOM_GOALS = 0.35
+	FRAC_COLLECTIVE_GOALS = 0.1
+	FRAC_MOVABLE_GOALS = 0.3
+	FRAC_PERSON_GOALS = 0.25
+
 	def generate_goal(self) -> Goal:
 		all_items = self.movable_items.copy()
 		all_stationary = self.stationary_items.copy()
-		usable_rooms = self.rooms.copy()
-		usable_movables, movable_probabilities = self.get_items_and_probabilities()
+		usable_rooms, room_probabilities = get_items_and_probabilities(self.room_goal_freq, self.room_type_goal_freq, self.rooms)
+		usable_movables, movable_probabilities = get_items_and_probabilities(self.item_goal_freq, self.item_type_goal_freq, self.movable_items)
+		usable_collectives, collective_probabilities = get_items_and_probabilities(self.collective_goal_type_freq, {}, collective_goal_types)
 		usable_people = self.people.copy()
-		usable_collectives = collective_goal_types.copy()
 		for _ in range(MAX_ITER):
 			assert len(usable_rooms) > 0 or len(usable_movables) > 0 or len(usable_people) > 0
-			choice = random.randrange(8)
-			if len(usable_rooms) > 0 and choice <= 2:
-				goal = usable_rooms.pop(random.randrange(len(usable_rooms))).generate_goal(self.people, all_items, self.agent)
+			choice = np.random.choice(np.arange(4), p=[DatasetGenerator.FRAC_ROOM_GOALS, DatasetGenerator.FRAC_COLLECTIVE_GOALS, DatasetGenerator.FRAC_MOVABLE_GOALS, DatasetGenerator.FRAC_PERSON_GOALS])
+			if choice == 0:
+				if len(usable_rooms) == 0:
+					continue
+				room_probabilities = normalize_probabilities(room_probabilities)
+				idx = np.random.choice(np.arange(len(usable_rooms)), p=room_probabilities)
+				room_probabilities.pop(idx)
+				room = usable_rooms.pop(idx)
+				goal = room.generate_goal(self.people, all_items, self.agent)
 				if goal is not None:
+					self.room_goal_freq[room] = self.room_goal_freq.get(room, 0) + 1
+					self.room_type_goal_freq[type(room)] = self.room_type_goal_freq.get(type(room), 0) + 1
 					return goal
-			elif len(usable_collectives) > 0 and choice <= 5:
-				goal = usable_collectives.pop(random.randrange(len(usable_collectives))).generate_goal(all_items, all_stationary, self.agent)
+			elif choice == 1:
+				if len(usable_collectives) == 0:
+					continue
+				collective_probabilities = normalize_probabilities(collective_probabilities)
+				idx = np.random.choice(np.arange(len(usable_collectives)), p=collective_probabilities)
+				collective_probabilities.pop(idx)
+				goal_type = usable_collectives.pop(idx)
+				goal = goal_type.generate_goal(all_items, all_stationary, self.agent)
 				if goal is not None:
+					self.collective_goal_type_freq[goal_type] = self.collective_goal_type_freq.get(goal_type, 0) + 1
 					return goal
-			elif len(usable_movables) > 0 and choice == 6:
+			elif choice == 2:
+				if len(usable_movables) == 0:
+					continue
 				movable_probabilities = normalize_probabilities(movable_probabilities)
 				idx = np.random.choice(np.arange(len(usable_movables)), p=movable_probabilities)
 				movable_probabilities.pop(idx)
 				item = usable_movables.pop(idx)
 				goal = item.generate_goal(self.people, all_items, self.agent)
 				if goal is not None:
-					self.item_freq[item] = self.item_freq.get(item, 0) + 1
-					self.item_type_freq[type(item)] = self.item_type_freq.get(type(item), 0) + 1
+					self.item_goal_freq[item] = self.item_goal_freq.get(item, 0) + 1
+					self.item_type_goal_freq[type(item)] = self.item_type_goal_freq.get(type(item), 0) + 1
 					return goal
-			elif len(usable_people) > 0:
+			elif choice == 3:
+				if len(usable_people) == 0:
+					continue
 				goal = usable_people.pop(random.randrange(len(usable_people))).generate_goal(all_items, self.agent)
 				if goal is not None:
 					return goal
@@ -2084,6 +2359,13 @@ class Dataset:
 				curr_data["knowledge_path"] = os.path.join(curr_dir, "knowledge.yaml")
 				with open(curr_data["knowledge_path"]) as f:
 					curr_data["knowledge_yaml"] = f.read()
+				try:
+					true_plan_path = os.path.join(curr_dir, "true_plan.pddl")
+					with open(true_plan_path) as f:
+						curr_data["true_plan_path"] = true_plan_path
+						curr_data["true_plan_pddl"] = f.read()
+				except:
+					pass
 			else:
 				raise Exception("Invalid dataset directory:", time_step)
 			self.time_steps.append(curr_data)
@@ -2122,5 +2404,5 @@ for item_type in item_types:
 	static_entities += item_type.get_static_entities()
 
 if __name__ == "__main__":
-	generator = DatasetGenerator("../experiment/domains/domain1", num_state_changes=10, state_changes_per_query=20, state_changes_per_goal=1)
+	generator = DatasetGenerator("experiment/domains/gpt-4o", num_state_changes=100, state_changes_per_query=300, state_changes_per_goal=5)
 	generator.run()

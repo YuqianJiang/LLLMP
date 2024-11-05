@@ -19,12 +19,13 @@ from knowledge_graph_planning.knowledge_graph.load_graph import load_graph
 from knowledge_graph_planning.knowledge_graph.age import AgeGraphStore
 from knowledge_graph_planning.knowledge_graph.utils import reset_database
 
-from llama_index.core import ServiceContext
 from llama_index.core.storage.storage_context import StorageContext
 from llama_index.llms.openai import OpenAI
 from llama_index.core.retrievers import KnowledgeGraphRAGRetriever
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.llms.openai.base import ChatMessage
+from llama_index.core.chat_engine import ContextChatEngine
+from llama_index.core.llms import ChatMessage, MessageRole
+from llama_index.core.callbacks import CallbackManager, TokenCountingHandler
+
 
 from .utils import get_prompt_template, extract_keywords
 from .chat_mem_buffer import TripletTrimBuffer
@@ -63,8 +64,9 @@ class UpdateResponse(BaseModel):
 
 class KGAgent(KGBaseAgent):
 	MAX_RETRY_STATE_CHANGE = 5
+	MAX_RETRY_GOAL = 5
 
-	def __init__(self, log_dir: str, use_rag: bool, use_verifier: bool, model: str = "gpt-4o") -> None:
+	def __init__(self, log_dir: str, use_rag: bool, use_verifier: bool, agent_label: str, model: str = "gpt-4o") -> None:
 		self.log_dir = log_dir
 		self.dbname = "knowledge_base"
 		self.dbuser = "postgres"
@@ -76,26 +78,28 @@ class KGAgent(KGBaseAgent):
 		self.time = 0
 		self.use_rag = use_rag
 		self.use_verifier = use_verifier
+		self.agent_label = agent_label
+
+		self.total_prompt_tokens = 0
+		self.total_completion_tokens = 0
+		self.total_llm_tokens = 0
 
 		openai_keys_file = os.path.join(os.path.dirname(__file__), "../../keys/openai_keys.txt")
 		with open(openai_keys_file, "r") as f:
 			keys = f.read()
 		keys = keys.strip().split('\n')
-		self.llm = OpenAI(temperature=0, model=model, api_key=keys[0])
+		self.token_counter = TokenCountingHandler(tokenizer=tiktoken.encoding_for_model(model).encode)
+		self.llm = OpenAI(temperature=0, model=model, api_key=keys[0], callback_manager=CallbackManager([self.token_counter]))
 		self.update_llm = self.llm.as_structured_llm(output_cls=UpdateResponse) # type: ignore
 	
 	def validate_json(self, json_str: str) -> tuple[list[str], UpdateResponse | None]:
 		# process the changes and commit to knowledge graph
 		try:
 			start_idx = json_str.index("{")
-		except ValueError:
-			return ["Your response was not in the correct JSON format"], None
-		
-		try:
 			end_idx = json_str.rindex("}")
 		except ValueError:
 			return ["Your response was not in the correct JSON format"], None
-		
+
 		json_str = json_str[start_idx : end_idx + 1]
 		try:
 			update_obj = UpdateResponse.model_validate_json(json_str)
@@ -177,7 +181,6 @@ class KGAgent(KGBaseAgent):
 
 		# load in all default prompts
 		ENTITY_SELECT_PROMPT = get_prompt_template("prompts/entity_select_prompt.txt", entity_names=entity_names)
-		self.TRIPLET_FILTER_PROMPT = get_prompt_template("prompts/triplet_filter_prompt.txt")
 		self.TRIPLET_UPDATE_PROMPT = get_prompt_template("prompts/triplet_update_prompt.txt",
 											predicate_names=", ".join(predicate_names), entity_names=entity_names)
 
@@ -213,8 +216,8 @@ class KGAgent(KGBaseAgent):
 			verbose=True,
 			graph_traversal_depth=3,
 			max_knowledge_sequence=300,
-			max_entities=10,
-			entity_extract_fn=partial(extract_keywords, self.llm, PLAN_ENTITY_SELECT_PROMPT),
+			max_entities=40,
+			entity_extract_fn=partial(extract_keywords, self.llm, PLAN_ENTITY_SELECT_PROMPT, max_keywords=40, always_include=[self.agent_label]),
 			synonym_expand_fn=(lambda _: []),
 			entity_extract_template=None,
 			synonym_expand_template=None,
@@ -222,10 +225,7 @@ class KGAgent(KGBaseAgent):
 		self.rag_plan_retriever._verbose = True
 		self.rag_plan_retriever._entity_extract_template = None # type: ignore
 		self.rag_plan_retriever._synonym_expand_template = None # type: ignore
-
-		self.query_engine = RetrieverQueryEngine.from_args(
-			self.rag_plan_retriever
-		)
+		self.chat_engine = ContextChatEngine.from_defaults(self.rag_plan_retriever, llm=self.llm)
 	
 	# format triplets from query output
 	@staticmethod
@@ -264,6 +264,7 @@ class KGAgent(KGBaseAgent):
 
 	def input_state_change(self, state_change: str) -> None:
 		start_time = time.time()
+		self.token_counter.reset_counts()
 		log = [f"STATE CHANGE: {state_change}"]
 
 		if self.use_rag:
@@ -272,15 +273,11 @@ class KGAgent(KGBaseAgent):
 			context_str = context_nodes[0].text if len(context_nodes) > 0 else "None"
 			triplets = [KGAgent.postprocess_triplet(triplet) for triplet in context_str.split('\n')[2:]]
 			extracted_triplets_str = '\n'.join(triplets)
-			# filter out irrelevant triplets using LLM directly
-			filtered_triplet_str = self.llm.complete(self.TRIPLET_FILTER_PROMPT.format(state_change=state_change, triplet_str=extracted_triplets_str)).text
 		else:
 			triplets = self.get_all_relations()
 			extracted_triplets_str = '\n'.join(triplets)
-			filtered_triplet_str = extracted_triplets_str
-
 		duration = time.time() - start_time
-		log += [f"EXTRACTED TRIPLETS:\n{extracted_triplets_str}", f"FILTERED TRIPLETS:\n{filtered_triplet_str}", f"Retrieved triplets in {duration:.2f} seconds"]
+		log += [f"EXTRACTED TRIPLETS:\n{extracted_triplets_str}", f"Retrieved triplets in {duration:.2f} seconds"]
 
 		update_issues = []
 		remove = []
@@ -294,8 +291,7 @@ class KGAgent(KGBaseAgent):
 
 		while num_attempts < KGAgent.MAX_RETRY_STATE_CHANGE and (update_issues or num_attempts == 0):
 			if len(update_issues) > 0:
-				curr_message = ChatMessage()
-				curr_message.content = "There are some issues with your provided updates:\n * " + "\n * ".join(update_issues) + "\nPlease try again."
+				curr_message = ChatMessage.from_str("There are some issues with your provided updates:\n * " + "\n * ".join(update_issues) + "\nPlease try again.")
 				messages.append(curr_message)
 				log.append("UPDATE ISSUES:\n * " + "\n * ".join(update_issues))
 				with open(os.path.join(self.log_dir, f"{self.time:04d}_state_change.messages.{num_attempts}"), "w") as f:
@@ -306,10 +302,10 @@ class KGAgent(KGBaseAgent):
 			print("Attempting state change...", num_attempts)
 
 			# query LLM to update triplets (remove existing and add new)
-			truncated_msgs = TripletTrimBuffer.from_defaults(messages, llm=self.llm, tokenizer_fn=tiktoken.encoding_for_model('gpt-4').encode).get(triplet_update_prompt, triplets=filtered_triplet_str)
+			truncated_msgs = TripletTrimBuffer.from_defaults(messages, llm=self.llm, tokenizer_fn=tiktoken.encoding_for_model(self.llm.model).encode).get(triplet_update_prompt, triplets=extracted_triplets_str)
 
 			curr_start_time = time.time()
-			curr_response = self.llm.chat(truncated_msgs).message
+			curr_response = self.update_llm.chat(truncated_msgs).message
 			duration = time.time() - curr_start_time
 			log.append(f"Got LLM response for attempt {num_attempts} in {duration:.2f} seconds")
 
@@ -346,9 +342,8 @@ class KGAgent(KGBaseAgent):
 						if expected_remove not in remove_strs:
 							update_issues.append(f"Cannot add '{triplet_str}' without removing '{expected_remove}'")
 							continue
-
-				if self.graph_store.rel_exists(subj, rel, obj):
-					update_issues.append(f"Cannot add '{triplet_str}' because it already exists in the graph")
+					if self.graph_store.rel_exists(subj, rel, obj):
+						update_issues.append(f"Cannot add '{triplet_str}' because it already exists in the graph")
 				
 			for triplet, triplet_str in zip(remove, remove_strs):
 				subj, rel, obj = triplet.subject, triplet.relation, triplet.object
@@ -357,46 +352,54 @@ class KGAgent(KGBaseAgent):
 						expected_add = "{} -> {} -> {}".format(subj, rel, "true" if obj == "false" else "false")
 						if expected_add not in add_strs:
 							update_issues.append(f"Cannot remove '{triplet_str}' without adding '{expected_add}'")
-				
-				if not self.graph_store.rel_exists(subj, rel, obj):
-					update_issues.append(f"Cannot remove '{triplet_str}' because it does not exist in the graph")
-					continue
+							continue
+					if not self.graph_store.rel_exists(subj, rel, obj):
+						update_issues.append(f"Cannot remove '{triplet_str}' because it does not exist in the graph")
+		
+		def complete():
+			duration = time.time() - start_time
+			self.total_prompt_tokens += self.token_counter.prompt_llm_token_count
+			self.total_completion_tokens += self.token_counter.completion_llm_token_count
+			self.total_llm_tokens += self.token_counter.total_llm_token_count
+			log.append(f"Total time to processed state change: {duration:.2f} seconds\nPrompt tokens: {self.token_counter.prompt_llm_token_count} | Completion tokens: {self.token_counter.completion_llm_token_count} | Total tokens: {self.token_counter.total_llm_token_count}")
+			# log the state update
+			log_file = os.path.join(self.log_dir, f"{self.time:04d}_state_change.log")
+			with open(log_file, "w") as f:
+				f.write("\n===================================\n".join(log))
+			self.time += 1
 
 		if update_issues:
 			print("Could not resolve state change within maximum number of tries", KGAgent.MAX_RETRY_STATE_CHANGE)
+			complete()
 			return
 		
 		# add new triplets to graph
 		for triplet in add:
 			subj, rel, obj = triplet.subject, triplet.relation, triplet.object
-			self.graph_store.upsert_triplet(subj, rel, obj)
+			if self.use_verifier or not self.graph_store.rel_exists(subj, rel, obj):
+				self.graph_store.upsert_triplet(subj, rel, obj)
 			
 		# delete triplets from graph
 		for triplet in remove:
 			subj, rel, obj = triplet.subject, triplet.relation, triplet.object
-			self.graph_store.delete(subj, rel, obj)
-		
-		duration = time.time() - start_time
-		log.append(f"Processed state change in (total time) {duration:.2f} seconds")
-		
-		# log the state update
-		log.append(f"Total time to process the update: {time.time() - start_time}")
-		log_file = os.path.join(self.log_dir, f"{self.time:04d}_state_change.log")
-		with open(log_file, "w") as f:
-			f.write("\n===================================\n".join(log))
-		self.time += 1
+			if self.use_verifier or self.graph_store.rel_exists(subj, rel, obj):
+				self.graph_store.delete(subj, rel, obj)
+
+		complete()
 	
 	def answer_planning_query(self, query: str) -> list[str]:
 		start_time = time.time()
+		self.token_counter.reset_counts()
 		log = [f"PLAN QUERY: {query}"]
+		log_file = os.path.join(self.log_dir, f"{self.time:04d}_plan_query")
+		plan_file_name = self.log_dir + f"/{self.time:04d}_plan.pddl"
+		project_dir = Path(__file__).parent.parent.parent.as_posix()
 
 		# A. generate problem pddl file
-		log_file = os.path.join(self.log_dir, f"{self.time:04d}_plan_query")
-
 		with open(log_file + ".context.log", "w") as f:
 			f.write(query + "\n")
 			with redirect_stdout(f):
-				nodes = self.query_engine.retrieve("I have a task for the robot: " + query) # type: ignore
+				nodes = self.chat_engine._get_nodes("I have a task for the robot: " + query)
 		duration = time.time() - start_time
 		log.append(f"Completed RAG in {duration:.2f} seconds")
 
@@ -431,39 +434,116 @@ class KGAgent(KGBaseAgent):
 			objects_block += f"\t\t{obj} - {obj_type}\n"
 		objects_block += "\t)\n"
 
-		plan_query_prompt = self.PLAN_QUERY_TEMPLATE.format(task_nl=query)
-		goal_block = self.query_engine._response_synthesizer.synthesize(query=plan_query_prompt, nodes=nodes).response # type:ignore
+		curr_prompt = self.PLAN_QUERY_TEMPLATE.format(task_nl=query)
+		messages: list[ChatMessage] = []
+		num_attempts = 0
 
-		task_pddl_ = f"(define (problem p{self.time})\n" + \
+		while num_attempts < KGAgent.MAX_RETRY_GOAL and curr_prompt:
+			if num_attempts > 0:
+				log.append("GOAL BLOCK ISSUES:\n" + curr_prompt)
+			
+			num_attempts += 1
+			print("Attempting generating goal block...", num_attempts)
+			
+			curr_start_time = time.time()
+			goal_block = self.chat_engine._get_response_synthesizer(messages).synthesize(curr_prompt, nodes=nodes).response
+			duration = time.time() - curr_start_time
+			messages.append(ChatMessage.from_str(curr_prompt))
+			messages.append(ChatMessage.from_str(goal_block, role=MessageRole.ASSISTANT))
+			curr_prompt = ""
+			
+			log.append(f"ATTEMPT {num_attempts}\n{goal_block}\nGot LLM response for attempt in {duration:.2f} seconds")
+			
+			try:
+				start_idx = goal_block.index("(")
+				end_idx = goal_block.rindex(")")
+			except ValueError:
+				curr_prompt = "The goal block does not follow the proper syntax. Please try again."
+				continue
+			
+			goal_block = goal_block[start_idx : end_idx + 1]
+			task_pddl = f"(define (problem p{self.time})\n" + \
 					 f"\t(:domain simulation)\n" + \
 					 objects_block + \
 					 init_block + \
 					 f"\t{goal_block}\n)"
 
-		# B. write the problem file into the problem folder
-		task_pddl_file_name = os.path.join(self.log_dir, f"{self.time:04d}_problem.pddl")
-		with open(task_pddl_file_name, "w") as f:
-			f.write(task_pddl_)
-		time.sleep(1)
+			# B. write the problem file into the problem folder
+			task_pddl_file_name = os.path.join(self.log_dir, f"{self.time:04d}_problem.pddl")
+			with open(task_pddl_file_name, "w") as f:
+				f.write(task_pddl)
 
-		# C. run lapkt to plan
-		plan_file_name = self.log_dir + f"/{self.time:04d}_plan.pddl"
-
-		project_dir = Path(__file__).parent.parent.parent.as_posix()
-		os.system(f"sudo docker run --rm -v {project_dir}:/root/experiments lapkt/lapkt-public ./siw-then-bfsf " + \
-				  f"--domain /root/experiments/{self.domain_path} " + \
-				  f"--problem /root/experiments/{task_pddl_file_name} " + \
-				  f"--output /root/experiments/{plan_file_name} " + \
-				  f"> {log_file}.pddl.log")
+			# C. run lapkt to plan
+			curr_start_time = time.time()
+			os.system(f"sudo docker run --rm -v {project_dir}:/root/experiments lapkt/lapkt-public ./siw-then-bfsf " + \
+					f"--domain /root/experiments/{self.domain_path} " + \
+					f"--problem /root/experiments/{task_pddl_file_name} " + \
+					f"--output /root/experiments/{plan_file_name} " + \
+					f"> {log_file}.pddl.log.{num_attempts} 2>&1")
+			duration = time.time() - curr_start_time
+			log.append(f"Planner took {duration:.2f} seconds")
+			
+			with open(f"{log_file}.pddl.log.{num_attempts}") as f:
+				planner_output = f.read().strip()
+			
+			if planner_output == "":
+				curr_prompt = "The planner crashed, so there is some error with your provided goal block. Please try again."
+			
+			if any(check_str in planner_output.lower() for check_str in ["error", "undeclared", "unknown"]):
+				curr_prompt = f"There was an error with your provided goal block, here is the planner output:\n```\n{planner_output}\n```\nPlease try again."
 		
+		if not curr_prompt and "simplified to false" in planner_output.lower():
+			# likely that RAG did not retrieve sufficient context, if so replan with full context
+			print("Retrying planner with full context in problem PDDL...")
+			init_block = "\t(:init\n"
+			for rel in self.get_all_relations():
+				rel_split = rel.split(" -> ")
+				arg1, predicate, arg2 = rel_split[0], rel_split[1], rel_split[2]
+				if self.get_relation_issues(arg1, predicate, arg2):
+					continue
+				elif arg2 == 'true':
+					init_block += f"\t\t({predicate} {arg1})\n"
+				elif arg2 == 'None' or arg2 == 'false':
+					continue
+				else:
+					init_block += f"\t\t({predicate} {arg1} {arg2})\n"
+			init_block += "\t)\n"
+			task_pddl = f"(define (problem p{self.time})\n" + \
+					 f"\t(:domain simulation)\n" + \
+					 objects_block + \
+					 init_block + \
+					 f"\t{goal_block}\n)"
+			
+			task_pddl_file_name = os.path.join(self.log_dir, f"{self.time:04d}_problem.pddl")
+			with open(task_pddl_file_name, "w") as f:
+				f.write(task_pddl)
+			
+			curr_start_time = time.time()
+			os.system(f"sudo docker run --rm -v {project_dir}:/root/experiments lapkt/lapkt-public ./siw-then-bfsf " + \
+					f"--domain /root/experiments/{self.domain_path} " + \
+					f"--problem /root/experiments/{task_pddl_file_name} " + \
+					f"--output /root/experiments/{plan_file_name} " + \
+					f"> {log_file}.pddl.log.{num_attempts + 1} 2>&1")
+			duration = time.time() - curr_start_time
+			log.append(f"Planner could not find solution, attempting last time with full context...\nPlanner took {duration:.2f} seconds")
+
 		duration = time.time() - start_time
-
-		log.append(f"Processed planning query in (total time) {duration:.2f} seconds")
-		
+		self.total_prompt_tokens += self.token_counter.prompt_llm_token_count
+		self.total_completion_tokens += self.token_counter.completion_llm_token_count
+		self.total_llm_tokens += self.token_counter.total_llm_token_count
+		log.append(f"Total time to process planning query: {duration:.2f} seconds\nPrompt tokens: {self.token_counter.prompt_llm_token_count} | Completion tokens: {self.token_counter.completion_llm_token_count} | Total tokens: {self.token_counter.total_llm_token_count}")
 		with open(f"{log_file}.log", "w") as f:
 			f.write("\n===================================\n".join(log))
-
 		self.time += 1
+
+		# need to initialize new token counter or token counting doesn't work after this for some reason
+		self.token_counter = TokenCountingHandler(tokenizer=tiktoken.encoding_for_model(self.llm.model).encode)
+		self.llm.callback_manager = CallbackManager([self.token_counter])
+
+		if curr_prompt:
+			print("Could not resolve goal block within maximum number of tries", KGAgent.MAX_RETRY_GOAL)
+			return []
+
 		return plan_file_name
 
 	@staticmethod
@@ -552,13 +632,28 @@ class KGAgent(KGBaseAgent):
 			for token, name in zip(action.parameters, args):
 				param_names[token[0]] = name
 
-			# check if action is able to succeed in real environment
-			if not (
-				all(KGAgent.is_condition_met(pos_prec, param_names, truth_graph_store) for pos_prec in action.positive_preconditions) and
-				all(KGAgent.is_condition_met(("not", neg_prec), param_names, truth_graph_store) for neg_prec in action.negative_preconditions)
-			):
-				print(f"Failure while processing plan at {item}")
-				return
+			# check if action is able to succeed in real environment, update graph based on observation
+			valid_step = True
+			for pos_prec in action.positive_preconditions:
+				if not KGAgent.is_condition_met(pos_prec, param_names, truth_graph_store):
+					valid_step = False
+					predicate, params = pos_prec[0], pos_prec[1:]
+					arg1, arg2 = param_names[params[0]], param_names[params[1]] if len(params) == 2 else "true"
+					self.graph_store.delete(arg1, predicate, arg2)
+					if arg2 == "true":
+						self.graph_store.upsert_triplet_bool(arg1, predicate, False)
+			for neg_prec in action.negative_preconditions:
+				if not KGAgent.is_condition_met(("not", neg_prec), param_names, truth_graph_store):
+					valid_step = False
+					predicate, params = neg_prec[0], neg_prec[1:]
+					arg1, arg2 = param_names[params[0]], param_names[params[1]] if len(params) == 2 else "true"
+					self.graph_store.upsert_triplet(arg1, predicate, arg2)
+					if arg2 == "true":
+						self.graph_store.delete(arg1, predicate, "false")
+
+			if not valid_step:
+				print(f"Failure processing step {item}")
+				continue
 
 			for del_effect in action.del_effects:
 				self.process_effect(del_effect, param_names, truth_graph_store, remove=True)

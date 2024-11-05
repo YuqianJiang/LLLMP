@@ -60,45 +60,38 @@ class AgeGraphStore(GraphStore): # type: ignore
             # unlike simple graph_store, we don't do get_all here
             return rel_map
         
-        subjs = [subj.replace('"', '') for subj in subjs]
+        subjs = [subj.lower().replace('"', '') for subj in subjs]
 
-        for subj in subjs:
-            rel_map[subj] = []
-        
         # max 100 can be processed at a time by db
-        for j in range(0, len(subjs), 100):
-            subjs_str = '["' + '", "'.join(subjs[j:j+100]) + '"]'
-
-            for i in range(depth):
-                path = f"-[]-(:{self._node_label})" * i
-
+        for i in range(depth):
+            path = f"-[]-(:{self._node_label})" * i
+            per_iter = 50 // (2 ** i)
+            for j in range(0, len(subjs), per_iter):
+                subjs_str = '["' + '", "'.join(subjs[j:j+per_iter]) + '"]'
                 query = (f"SELECT * FROM ag_catalog.cypher('{self._graph_name}', $$ "
                         f"MATCH p=(n1:{self._node_label}){path}-[]-() "
                         f"WHERE n1.name IN {subjs_str} "
                         f"WITH n1.name AS subj, p, relationships(p) AS rels "
                         f"UNWIND rels AS rel "
-                        f"WITH subj AS subj, p, collect([startNode(rel).name, type(rel), endNode(rel).name]) AS predicates "
+                        f"WITH startNode(rel).name AS subj, p, collect([startNode(rel).name, type(rel), endNode(rel).name]) AS predicates "
                         f"RETURN subj, predicates LIMIT {limit}"
                         f"$$) as (subj agtype, rel agtype);"
                         )
                 cur = self.cursor()
                 try:
                     cur.execute(query)
-                except psycopg2.errors.TooManyArguments as err:
-                    # should never happen
-                    print(err)
-                    print(query)
-                    print(subjs_str)
+                except Exception as err:
+                    print("Query:", query)
+                    print("Subjects:", subjs_str)
                     raise err
-                except psycopg2.errors.SyntaxError as err:
-                    print(err)
-                    print(query)
-                    print(subjs_str)
                 results = cur.fetchall()
                 for row in results:
                     for rel in eval(row[1]):
                         rel_str = "" + rel[0] + ", -[" + rel[1] + "], " + "-> " + rel[2] + ""
-                        if rel_str not in rel_map[eval(row[0])]:
+                        key = eval(row[0])
+                        if key not in rel_map:
+                            rel_map[key] = [rel_str]
+                        elif rel_str not in rel_map[eval(row[0])]:
                             rel_map[eval(row[0])].append(rel_str)
 
         return rel_map
