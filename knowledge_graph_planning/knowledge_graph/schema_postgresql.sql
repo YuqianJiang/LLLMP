@@ -570,7 +570,7 @@ VALUES ('answer_to', 'id'),
 ('room_has', 'id'),
 ('shelf_has_level', 'id'),
 ('tv_playing_channel', 'id'),
-('tv_on', 'id');
+('tv_on', 'bool');
 $$;
 
 

@@ -1,3 +1,3 @@
 "{text}"
-Current knowledge is provided below in the form of (subject , -[predicate]->, object).
+Current knowledge is provided below in the form of (subject, -[predicate]->, object).
 {context}

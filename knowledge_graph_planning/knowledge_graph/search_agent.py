@@ -62,6 +62,14 @@ class KGSearchAgent(KGAgent):
         self.graph_name = "knowledge_graph"
         self.time = 0
 
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_llm_tokens = 0
+
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.llm_tokens = 0
+
         openai_keys_file = os.path.join(os.path.dirname(__file__), "../../keys/openai_keys.txt")
         with open(openai_keys_file, "r") as f:
             keys = f.read()
@@ -160,6 +168,7 @@ class KGSearchAgent(KGAgent):
 
     def input_state_change(self, state_change: str) -> None:
         start_time = time.time()
+        self.reset_token_counter()
         self.entity_types = self.graph_store.get_all_entities()
         self.all_entities = list(self.entity_types.keys())
         log_file = self.log_dir + f"/{self.time:04d}_state_change.log"
@@ -208,12 +217,18 @@ class KGSearchAgent(KGAgent):
                     self.graph_store.delete_rel_with_subj(subj, predicate)
                     self.graph_store.upsert_triplet(subj, predicate, obj)
 
-            f.write(f"Total time to process the update: {time.time() - start_time}")
+            f.write(f"Total time to process the update: {time.time() - start_time}\n"
+                    f"Prompt tokens: {self.prompt_tokens} | Completion tokens: {self.completion_tokens} | Total tokens: {self.llm_tokens}")
+
+        self.total_prompt_tokens += self.prompt_tokens
+        self.total_completion_tokens += self.completion_tokens
+        self.total_llm_tokens += self.llm_tokens
 
         self.time += 1
 
     def answer_planning_query(self, query: str) -> list[str]:
         start_time = time.time()
+        self.reset_token_counter()
         self.entity_types = self.graph_store.get_all_entities()
         self.all_entities = list(self.entity_types.keys())
 
@@ -231,7 +246,7 @@ class KGSearchAgent(KGAgent):
         nodes = ['the_agent']
         for matches in list(mapping.values()):
             nodes.extend(matches)
-        relations = self.graph_store.get_rel_map(nodes, depth=2, limit=200)
+        relations = self.graph_store.get_rel_map(nodes, depth=2, limit=1000)
 
         objects = set()
         init_block = "\t(:init\n"
@@ -259,14 +274,21 @@ class KGSearchAgent(KGAgent):
 
         goal_user_prompt = self.goal_user_prompt.format(text=query, context=objects_block + init_block)
         completion = self.llm.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-2024-08-06",
             messages=[
                 {"role": "system", "content": self.goal_system_prompt},
                 {"role": "user", "content": goal_user_prompt}
             ],
             temperature=0
         )
+        self.prompt_tokens += completion.usage.prompt_tokens
+        self.completion_tokens += completion.usage.completion_tokens
+        self.llm_tokens += completion.usage.total_tokens
         goal_block = completion.choices[0].message.content
+        start = goal_block.find('(')
+        end = goal_block.rfind(')')
+        if start != -1 and end != -1 and start < end:
+            goal_block = goal_block[start:end+1]
 
         '''
         goal_block = "\t(:goal\n \t\t(and\n"
@@ -311,7 +333,12 @@ class KGSearchAgent(KGAgent):
                   f"> {log_file}.pddl.log")
 
         with open(log_file + ".log", "w") as f:
-            f.write(f"Total time to generate the plan: {time.time() - start_time}")
+            f.write(f"Total time to generate the plan: {time.time() - start_time}\n"
+                    f"Prompt tokens: {self.prompt_tokens} | Completion tokens: {self.completion_tokens} | Total tokens: {self.llm_tokens}")
+
+        self.total_prompt_tokens += self.prompt_tokens
+        self.total_completion_tokens += self.completion_tokens
+        self.total_llm_tokens += self.llm_tokens
 
         self.time += 1
         return plan_file_name
@@ -319,7 +346,7 @@ class KGSearchAgent(KGAgent):
     def parse(self, system, user, schema):
         start_time = time.time()
         completion = self.llm.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-2024-08-06",
             response_format={"type": "json_schema", "json_schema": schema},
             messages=[
                 {"role": "system", "content": system},
@@ -327,6 +354,9 @@ class KGSearchAgent(KGAgent):
             ],
             temperature=0
         )
+        self.prompt_tokens += completion.usage.prompt_tokens
+        self.completion_tokens += completion.usage.completion_tokens
+        self.llm_tokens += completion.usage.total_tokens
         parse_result = json.loads(completion.choices[0].message.content)
         print("------------------------------------------------")
         print(json.dumps(parse_result, indent=2))
@@ -358,6 +388,9 @@ class KGSearchAgent(KGAgent):
             temperature=0,
             response_format=EntityExtraction
         )
+        self.prompt_tokens += completion.usage.prompt_tokens
+        self.completion_tokens += completion.usage.completion_tokens
+        self.llm_tokens += completion.usage.total_tokens
         print("------------------------------------------------")
         print(user_prompt)
         parse_result = completion.choices[0].message.parsed.entities
@@ -391,7 +424,7 @@ class KGSearchAgent(KGAgent):
         best_mapping_score = -np.inf
         best_mapping = None
         best_mapping_score, best_mapping = self.backtrack(text, query_nodes, query_g, M, query_q, {},
-                                                          best_mapping_score, best_mapping, cutoff_ratio=0.9)
+                                                          best_mapping_score, best_mapping, cutoff_ratio=0.95)
         return best_mapping
 
     def mapping_score(self, query_g, current_mapping):
@@ -480,7 +513,7 @@ class KGSearchAgent(KGAgent):
             query_g.add_node(obj['id'], type=obj['description'], candidates=obj['candidates'])
 
         for edge in edges:
-            if len(edge.values()) < 3:
+            if edge is None or len(edge.values()) < 3:
                 continue
             obj = list(edge.values())[2]
             subj = list(edge.values())[0]
@@ -500,3 +533,8 @@ class KGSearchAgent(KGAgent):
 
     def close(self) -> None:
         self.graph_store._conn.close()
+
+    def reset_token_counter(self) -> None:
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.llm_tokens = 0

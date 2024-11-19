@@ -128,6 +128,7 @@ class KGSim:
 				"knowledge_graph",
 				"entity",
 			) # type: ignore
+			load_graph(truth_graph_store, "knowledge_graph")
 			bad_agent_loc = get_true_agent_loc(truth_graph_store)
 			truth_graph_store.delete(AGENT_LABEL, AGENT_IN_ROOM, bad_agent_loc)
 			truth_graph_store.upsert_triplet(AGENT_LABEL, AGENT_IN_ROOM, true_agent_loc)
@@ -200,9 +201,9 @@ if __name__ == "__main__":
 			self.log.close()
 
 	experiment_dir = "experiment"
-	domain_path = f"{experiment_dir}/domains/domain1"
+	domain_path = f"{experiment_dir}/domains/gpt-4o-4"
 	# run_dir = f"{experiment_dir}/runs/gpt-4/rag+check"
-	run_dir = f"{experiment_dir}/runs/gpt-4o/rag+search/domain1"
+	run_dir = f"{experiment_dir}/runs/rag+search/gpt-4o-4"
 	log = Logger(f"{run_dir}/output.log")
 
 	def cleanup(exit: bool = False):
